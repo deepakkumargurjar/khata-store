@@ -1,19 +1,16 @@
-// frontend/src/api.js
 import axios from 'axios';
 
-// VITE_API_URL should be something like "https://your-backend.onrender.com/api"
-// If VITE_API_URL is not provided, fallback to local dev server
-const BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+// VITE_API_URL should be specified like: https://khata-store-1.onrender.com
+// Note: we append /api here because backend routes are under /api
+const base = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/$/, '');
+const API_BASE = base.endsWith('/api') ? base : `${base}/api`;
 
-const API = axios.create({
-  baseURL: BASE,
-  // you can add timeout here if you like, e.g. timeout: 10000
-});
+const API = axios.create({ baseURL: API_BASE });
 
 API.interceptors.request.use(config => {
   const token = localStorage.getItem('token');
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
-}, err => Promise.reject(err));
+});
 
 export default API;
