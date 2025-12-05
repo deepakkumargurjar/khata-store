@@ -4,47 +4,64 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
+const helmet = require('helmet');
 
 const app = express();
 mongoose.set('strictQuery', false);
 
 const PORT = process.env.PORT || 5000;
-const MONGO_URI = process.env.MONGO_URI;
-const FRONTEND_URL = process.env.FRONTEND_URL || ''; // set this in Render to your frontend URL (e.g. https://khata-storee.onrender.com)
+const MONGO_URI = process.env.MONGO_URI || '';
+const FRONTEND_URL = process.env.FRONTEND_URL || ''; // e.g. https://khata-storee.onrender.com
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// configure cloudinary
+// configure cloudinary (safe defaults if not set)
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || '',
   api_key: process.env.CLOUDINARY_API_KEY || '',
   api_secret: process.env.CLOUDINARY_API_SECRET || ''
 });
 
-// CORS: allow only the frontend origin or allow all if FRONTEND_URL is empty (temporary)
+// security headers
+app.use(helmet());
+
+// CORS config: prefer explicit FRONTEND_URL or ALLOWED_ORIGINS; fallback to allow all (only while testing)
+const origins = [];
+if (FRONTEND_URL) origins.push(FRONTEND_URL);
+if (ALLOWED_ORIGINS.length) origins.push(...ALLOWED_ORIGINS);
+
 const corsOptions = {
-  origin: FRONTEND_URL || true, // set FRONTEND_URL in Render for production (do NOT use true in prod)
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  origin: function(origin, callback) {
+    // allow non-browser tools (no origin) and same-origin
+    if (!origin) return callback(null, true);
+    // if list provided, only allow those
+    if (origins.length > 0) {
+      if (origins.includes(origin)) return callback(null, true);
+      return callback(new Error('Not allowed by CORS'), false);
+    }
+    // no list configured -> allow all (development)
+    return callback(null, true);
+  },
+  methods: ['GET','HEAD','PUT','PATCH','POST','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','Accept'],
   credentials: true,
-  preflightContinue: false,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 200
 };
+
+// apply CORS and preflight handling
 app.use(cors(corsOptions));
-// make sure preflight (OPTIONS) uses cors as well:
 app.options('*', cors(corsOptions));
 
-// parse body
+// body parsers
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Debug logger (only enable while testing)
-if (process.env.NODE_ENV !== 'production') {
-  app.use((req, res, next) => {
-    console.log('[REQ]', req.method, req.originalUrl);
-    next();
-  });
-}
+// small request logger for debugging
+app.use((req, res, next) => {
+  console.log(`[REQ] ${req.method} ${req.originalUrl} - origin:${req.headers.origin || '-'}`);
+  next();
+});
 
-// mount routes
+// mount routes (unchanged)
 const authRoutes = require('./routes/auth');
 const folderRoutes = require('./routes/folders');
 const itemRoutes = require('./routes/items');
@@ -59,30 +76,42 @@ app.use('/api/profile', profileRoutes);
 
 // health + root
 app.get('/', (req, res) => res.send('Hello from backend'));
-app.get('/health', (req, res) => res.json({ ok: true, mongoConnected: mongoose.connection.readyState === 1 }));
+app.get('/health', (req, res) => res.json({
+  ok: true,
+  mongoReadyState: mongoose.connection.readyState // 0 disconnected, 1 connected, 2 connecting, 3 disconnecting
+}));
 
-// init: connect DB (if available) and always start server so Render sees a bound port
+// connect and start server
 async function init() {
-  try {
-    if (MONGO_URI) {
-      await mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-      console.log('✅ Connected to MongoDB');
-    } else {
-      console.warn('⚠️ MONGO_URI not set — skipping DB connect (set this in Render env vars).');
-    }
-  } catch (err) {
-    console.error('MongoDB connection failed:', err && err.message ? err.message : err);
-    // don't exit; start server so Render can show logs and you can debug
-  } finally {
-    app.listen(PORT, () => {
-      console.log(`Server listening on port ${PORT} (FRONTEND_URL=${FRONTEND_URL || 'not set'})`);
-    });
+  // Start server immediately so health checks don't fail even if DB is slow
+  const server = app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT} (FRONTEND_URL=${FRONTEND_URL || 'not set'})`);
+  });
+
+  if (!MONGO_URI) {
+    console.warn('⚠️  MONGO_URI not set — DB connection skipped. Set env MONGO_URI in Render.');
+    return;
   }
 
-  // helpful mongoose events
-  mongoose.connection.on('disconnected', () => console.warn('MongoDB disconnected'));
-  mongoose.connection.on('reconnected', () => console.log('MongoDB reconnected'));
-  mongoose.connection.on('error', (err) => console.error('MongoDB connection error:', err));
+  try {
+    // Longer serverSelectionTimeoutMS to handle remote DB slowness
+    await mongoose.connect(MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 30000,
+      socketTimeoutMS: 45000
+    });
+    console.log('✅ Connected to MongoDB');
+  } catch (err) {
+    console.error('MongoDB connect failed:', err && err.message ? err.message : err);
+    // Don't crash the server — keep it running so you can debug (the routes will fail if they require DB)
+  }
+
+  // helpful listeners
+  mongoose.connection.on('connected', () => console.log('MongoDB: connected'));
+  mongoose.connection.on('error', (e) => console.error('MongoDB error:', e && e.message ? e.message : e));
+  mongoose.connection.on('disconnected', () => console.warn('MongoDB: disconnected'));
+  mongoose.connection.on('reconnected', () => console.log('MongoDB: reconnected'));
 }
 
 init();
